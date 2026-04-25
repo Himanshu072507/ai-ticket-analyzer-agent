@@ -37,7 +37,7 @@ Opens at http://localhost:8501. Upload `sample_tickets.xlsx` to try it immediate
 
 1. Auto-detects ticket columns (category, description, department, date, priority, status). Let's you remap if detection is off.
 2. Renders KPI cards + 5 charts: category bar, department bar, volume over time, status donut, category x department heatmap.
-3. Calls either Gemini (`gemini-2.5-flash` with fallback to 2.0-flash / flash-lite) or a local Ollama model to produce: top themes, priority ranking, department spotlight, and concrete recommendations.
+3. **AI Drill-Down**: a one-paragraph headline narrative, a ranked category list, and lazy per-category clustering. Click a category to see 3–5 AI-named sub-issues; expand a sub-issue for trend, examples, root cause, owner, and suggested fix.
 4. Export summary as Markdown.
 
 ## Files
@@ -46,3 +46,14 @@ Opens at http://localhost:8501. Upload `sample_tickets.xlsx` to try it immediate
 - `analyzer.py` — Gemini + Ollama backends, structured JSON output
 - `charts.py` — Plotly chart builders
 - `sample_tickets.xlsx` — 50 realistic sample rows
+
+## Running tests
+
+```bash
+source .venv/bin/activate
+pip install pytest pytest-mock      # one-time
+pytest -q                            # core suite (no real API calls)
+pytest -q -m smoke                   # also run the Streamlit AppTest smoke test
+```
+
+Provider calls are mocked — no Gemini key or Ollama daemon required to run tests.

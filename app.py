@@ -9,7 +9,14 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-from analyzer import DEFAULT_OLLAMA_HOST, DEFAULT_OLLAMA_MODEL, analyze, list_ollama_models
+from analyzer import (
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_OLLAMA_MODEL,
+    analyze_category,
+    analyze_overview,
+    list_ollama_models,
+)
+from clustering import cluster_trend, match_tickets_to_clusters
 from charts import (
     category_bar,
     category_dept_heatmap,
@@ -93,47 +100,113 @@ def kpi_strip(df: pd.DataFrame, m: dict) -> None:
         cols[3].metric("Top category", "-")
 
 
-def render_insights(insights: dict) -> None:
-    st.subheader("AI Summary")
-
-    st.markdown("**Top themes**")
-    for theme in insights.get("top_themes", []):
-        st.markdown(f"- **{theme['title']}** — {theme['detail']}")
-
-    st.markdown("**Priority ranking**")
-    for i, item in enumerate(insights.get("priority_ranking", []), 1):
-        with st.expander(f"{i}. {item['issue']} — {item['impact']}", expanded=i == 1):
-            st.markdown(f"**Suggested owner:** {item['suggested_owner']}")
-            st.markdown(f"**Rationale:** {item['rationale']}")
-
-    spot = insights.get("department_spotlight") or {}
-    if spot:
-        st.markdown(f"**Department spotlight — {spot.get('department', '')}**")
-        st.info(spot.get("finding", ""))
-
-    st.markdown("**Recommendations**")
-    for rec in insights.get("recommendations", []):
-        st.markdown(f"- **{rec['action']}** → {rec['expected_outcome']}")
-
-
-def insights_markdown(insights: dict) -> str:
-    out = ["# AI Ticket Analyzer Agent — Report", f"_Generated {datetime.now():%Y-%m-%d %H:%M}_", ""]
-    out.append("## Top themes")
-    for t in insights.get("top_themes", []):
-        out.append(f"- **{t['title']}** — {t['detail']}")
-    out.append("\n## Priority ranking")
-    for i, item in enumerate(insights.get("priority_ranking", []), 1):
-        out.append(f"{i}. **{item['issue']}** ({item['impact']})")
-        out.append(f"   - Owner: {item['suggested_owner']}")
-        out.append(f"   - Rationale: {item['rationale']}")
-    spot = insights.get("department_spotlight") or {}
-    if spot:
-        out.append(f"\n## Department spotlight — {spot.get('department', '')}")
-        out.append(spot.get("finding", ""))
-    out.append("\n## Recommendations")
-    for rec in insights.get("recommendations", []):
-        out.append(f"- **{rec['action']}** — {rec['expected_outcome']}")
+def drilldown_markdown(overview: dict, clusters_by_category: dict[str, dict]) -> str:
+    """Serialize the headline + any explored category clusters into markdown."""
+    out = ["# AI Ticket Analyzer Agent — Drill-Down Report",
+           f"_Generated {datetime.now():%Y-%m-%d %H:%M}_", ""]
+    out.append("## Headline")
+    out.append(overview.get("headline", ""))
+    out.append("\n## Categories (ranked)")
+    for c in overview.get("ranked_categories", []):
+        out.append(f"- **{c['name']}** — {c['count']} tickets ({c['percent']:.1f}%)")
+    if clusters_by_category:
+        out.append("\n## Explored categories")
+        for cat, payload in clusters_by_category.items():
+            out.append(f"\n### {cat}")
+            for cl in payload.get("clusters", []):
+                out.append(f"- **{cl['name']}** — {cl['summary']}")
+                out.append(f"  - Root cause: {cl['root_cause']}")
+                out.append(f"  - Owner: {cl['suggested_owner']}")
+                out.append(f"  - Suggested fix: {cl['suggested_fix']}")
     return "\n".join(out)
+
+
+def render_drilldown(
+    df: pd.DataFrame,
+    mapping: dict,
+    provider_id: str,
+    api_key: str,
+    ollama_model: str,
+    ollama_host: str,
+) -> None:
+    overview = st.session_state.get("overview")
+    if not overview:
+        return
+
+    st.subheader("AI Drill-Down")
+    st.markdown(f"**Headline:** {overview['headline']}")
+
+    categories = overview.get("ranked_categories", [])
+    if not categories:
+        st.info("No categories returned.")
+        return
+
+    if "selected_category" not in st.session_state:
+        st.session_state["selected_category"] = categories[0]["name"]
+    st.session_state.setdefault("category_clusters", {})
+
+    left, right = st.columns([1, 2], gap="large")
+
+    with left:
+        st.markdown("**Categories**")
+        for c in categories:
+            label = f"{c['name']} — {c['count']} ({c['percent']:.0f}%)"
+            if st.button(label, key=f"cat-btn-{c['name']}", use_container_width=True):
+                st.session_state["selected_category"] = c["name"]
+
+    selected = st.session_state["selected_category"]
+
+    with right:
+        st.markdown(f"**Top issues — {selected}**")
+        cat_col, desc_col = mapping["category"], mapping["description"]
+        cat_df = df[df[cat_col].astype(str) == str(selected)]
+
+        if len(cat_df) < 5:
+            st.info("Too few tickets to cluster — showing raw descriptions.")
+            for d in cat_df[desc_col].dropna().astype(str).head(10):
+                st.markdown(f"- {d[:200]}")
+            return
+
+        cached = st.session_state["category_clusters"].get(selected)
+        if not cached:
+            with st.spinner(f"Clustering '{selected}'..."):
+                try:
+                    cached = analyze_category(
+                        df, mapping, selected,
+                        provider=provider_id, api_key=api_key,
+                        ollama_model=ollama_model, ollama_host=ollama_host,
+                    )
+                    st.session_state["category_clusters"][selected] = cached
+                except Exception as e:
+                    st.error(f"Could not cluster '{selected}': {e}")
+                    if st.button("Retry", key=f"retry-{selected}"):
+                        st.rerun()
+                    return
+
+        clusters = cached.get("clusters", [])
+        if not clusters:
+            st.warning("No clusters returned — try a different category.")
+            return
+        matches = match_tickets_to_clusters(cat_df, desc_col, clusters)
+
+        for cl in clusters:
+            sub = matches.get(cl["name"], cat_df.iloc[0:0])
+            count_label = f"{len(sub)} tickets" if len(sub) else "— no keyword match"
+            with st.expander(f"{cl['name']} · {count_label} — {cl['summary']}"):
+                if mapping.get("date") and not sub.empty:
+                    st.plotly_chart(
+                        cluster_trend(sub, mapping["date"], "D"),
+                        use_container_width=True,
+                    )
+                st.markdown(f"**Root cause:** {cl['root_cause']}")
+                st.markdown(f"**Suggested owner:** {cl['suggested_owner']}")
+                st.markdown(f"**Suggested fix:** {cl['suggested_fix']}")
+                if not sub.empty:
+                    st.markdown("**Example tickets:**")
+                    for d in sub[desc_col].dropna().astype(str).head(10):
+                        st.markdown(f"- {d[:200]}")
+                else:
+                    st.caption("No tickets matched the AI-supplied keywords.")
 
 
 st.title("AI Ticket Analyzer Agent")
@@ -241,15 +314,22 @@ with c4:
 
 st.divider()
 
-cache_key = (uploaded.name, tuple(sorted(mapping.items())), provider_id, ollama_model if provider_id == "ollama" else None)
-if st.session_state.get("insights_key") != cache_key:
-    st.session_state.pop("insights", None)
+cache_key = (
+    uploaded.name,
+    tuple(sorted(mapping.items())),
+    provider_id,
+    ollama_model if provider_id == "ollama" else None,
+)
+if st.session_state.get("overview_key") != cache_key:
+    st.session_state.pop("overview", None)
+    st.session_state.pop("category_clusters", None)
+    st.session_state.pop("selected_category", None)
 
 provider_ready = (provider_id == "gemini" and bool(api_key)) or (
     provider_id == "ollama" and bool(ollama_model)
 )
 
-if "insights" not in st.session_state:
+if "overview" not in st.session_state:
     if not provider_ready:
         if provider_id == "gemini":
             st.info("Paste a Gemini API key in the sidebar (or set `GEMINI_API_KEY` in `.env`) to generate AI insights.")
@@ -263,21 +343,23 @@ if "insights" not in st.session_state:
         )
         with st.spinner(spinner_label):
             try:
-                st.session_state["insights"] = analyze(
+                st.session_state["overview"] = analyze_overview(
                     df, mapping,
-                    provider=provider_id,
-                    api_key=api_key,
-                    ollama_model=ollama_model,
-                    ollama_host=ollama_host,
+                    provider=provider_id, api_key=api_key,
+                    ollama_model=ollama_model, ollama_host=ollama_host,
                 )
-                st.session_state["insights_key"] = cache_key
+                st.session_state["overview_key"] = cache_key
             except Exception as e:
                 st.error(str(e))
 
-if "insights" in st.session_state:
-    render_insights(st.session_state["insights"])
-    md = insights_markdown(st.session_state["insights"])
+if "overview" in st.session_state:
+    render_drilldown(df, mapping, provider_id, api_key, ollama_model, ollama_host)
+    md = drilldown_markdown(
+        st.session_state["overview"],
+        st.session_state.get("category_clusters", {}),
+    )
     st.download_button(
-        "Download summary as Markdown", md,
-        file_name=f"ticket-insights-{datetime.now():%Y%m%d-%H%M}.md", mime="text/markdown",
+        "Download report as Markdown", md,
+        file_name=f"ticket-drilldown-{datetime.now():%Y%m%d-%H%M}.md",
+        mime="text/markdown",
     )

@@ -59,7 +59,7 @@ def test_cluster_trend_returns_points_for_dated_df() -> None:
 def test_cluster_trend_handles_empty_df() -> None:
     fig = cluster_trend(pd.DataFrame(), "date", "D")
     assert len(fig.data) == 0
-    assert any("No trend" in (a.text or "") for a in fig.layout.annotations)
+    assert any("No data" in (a.text or "") for a in fig.layout.annotations)
 
 
 def test_cluster_trend_handles_no_date_col() -> None:

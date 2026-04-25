@@ -105,6 +105,7 @@ def default_mapping(sample_df: pd.DataFrame) -> dict[str, str | None]:
     """Best-effort mapping for the bundled sample file."""
     cols = {c.lower(): c for c in sample_df.columns}
     return {
+        "ticket_id": cols.get("ticket id"),
         "category": cols.get("category"),
         "description": cols.get("description"),
         "department": cols.get("department"),

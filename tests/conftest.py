@@ -59,7 +59,7 @@ def create_streamlit_mock():
 
     return st
 
-# Install streamlit mock in sys.modules before importing anything else
+# Install streamlit mock in sys.modules before importing app
 sys.modules['streamlit'] = create_streamlit_mock()
 
 # Now we can safely import analyzer and app
@@ -82,6 +82,16 @@ except StopStreamlit:
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_PATH = REPO_ROOT / "sample_tickets.xlsx"
+
+
+def pytest_runtest_setup(item):
+    """Before each test runs, check if it's a smoke test and remove the mock if so."""
+    if "smoke" in item.keywords:
+        # For smoke tests, we need the real streamlit
+        if 'streamlit' in sys.modules and isinstance(sys.modules['streamlit'], MagicMock):
+            del sys.modules['streamlit']
+        if 'app' in sys.modules:
+            del sys.modules['app']
 
 
 @pytest.fixture

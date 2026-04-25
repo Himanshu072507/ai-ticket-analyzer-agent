@@ -34,29 +34,51 @@ Guidelines:
 Return your analysis as JSON that conforms exactly to the provided schema."""
 
 
-def _arr(min_i: int, max_i: int, props: dict) -> dict:
-    return {
-        "type": "array", "minItems": min_i, "maxItems": max_i,
-        "items": {"type": "object", "properties": props, "required": list(props)},
-    }
-
-
 _STR = {"type": "string"}
-RESPONSE_SCHEMA: dict[str, Any] = {
+_NUM = {"type": "number"}
+_INT = {"type": "integer"}
+
+OVERVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "top_themes": _arr(3, 5, {"title": _STR, "detail": _STR}),
-        "priority_ranking": _arr(3, 7, {
-            "issue": _STR, "impact": _STR, "suggested_owner": _STR, "rationale": _STR,
-        }),
-        "department_spotlight": {
-            "type": "object",
-            "properties": {"department": _STR, "finding": _STR},
-            "required": ["department", "finding"],
+        "headline": _STR,
+        "ranked_categories": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+                "type": "object",
+                "properties": {"name": _STR, "count": _INT, "percent": _NUM},
+                "required": ["name", "count", "percent"],
+            },
         },
-        "recommendations": _arr(3, 6, {"action": _STR, "expected_outcome": _STR}),
     },
-    "required": ["top_themes", "priority_ranking", "department_spotlight", "recommendations"],
+    "required": ["headline", "ranked_categories"],
+}
+
+CATEGORY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "clusters": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": _STR,
+                    "summary": _STR,
+                    "keywords": {"type": "array", "items": _STR, "minItems": 1, "maxItems": 8},
+                    "root_cause": _STR,
+                    "suggested_owner": _STR,
+                    "suggested_fix": _STR,
+                },
+                "required": ["name", "summary", "keywords", "root_cause",
+                             "suggested_owner", "suggested_fix"],
+            },
+        }
+    },
+    "required": ["clusters"],
 }
 
 
@@ -109,14 +131,14 @@ def _is_transient(err: Exception) -> bool:
     return any(code in msg for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"))
 
 
-def _call_gemini(client: genai.Client, model: str, payload: str) -> str:
+def _call_gemini(client: genai.Client, model: str, payload: str, schema: dict) -> str:
     response = client.models.generate_content(
         model=model,
         contents=payload,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             response_mime_type="application/json",
-            response_schema=RESPONSE_SCHEMA,
+            response_schema=schema,
             max_output_tokens=4096,
         ),
     )
@@ -125,14 +147,14 @@ def _call_gemini(client: genai.Client, model: str, payload: str) -> str:
     return response.text
 
 
-def _call_ollama(host: str, model: str, payload: str) -> str:
+def _call_ollama(host: str, model: str, payload: str, schema: dict) -> str:
     body = json.dumps({
         "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": payload},
         ],
-        "format": RESPONSE_SCHEMA,
+        "format": schema,
         "stream": False,
         "options": {"temperature": 0.2, "num_predict": 4096},
     }).encode()
@@ -149,7 +171,7 @@ def _call_ollama(host: str, model: str, payload: str) -> str:
     return content
 
 
-def _analyze_gemini(payload: str, api_key: str) -> dict:
+def _analyze_gemini(payload: str, api_key: str, schema: dict) -> dict:
     if not api_key:
         raise RuntimeError("Gemini API key is required.")
     client = genai.Client(api_key=api_key)
@@ -157,7 +179,7 @@ def _analyze_gemini(payload: str, api_key: str) -> dict:
     for model in [MODEL, *FALLBACK_MODELS]:
         for attempt in range(MAX_RETRIES):
             try:
-                return json.loads(_call_gemini(client, model, payload))
+                return json.loads(_call_gemini(client, model, payload, schema))
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"Gemini response was not valid JSON: {e}") from e
             except Exception as e:
@@ -172,9 +194,9 @@ def _analyze_gemini(payload: str, api_key: str) -> dict:
     )
 
 
-def _analyze_ollama(payload: str, model: str, host: str) -> dict:
+def _analyze_ollama(payload: str, model: str, host: str, schema: dict) -> dict:
     try:
-        text = _call_ollama(host, model, payload)
+        text = _call_ollama(host, model, payload, schema)
     except urllib.error.URLError as e:
         raise RuntimeError(
             f"Could not reach Ollama at {host}. Is it running? (`ollama serve`). Details: {e}"
@@ -187,7 +209,24 @@ def _analyze_ollama(payload: str, model: str, host: str) -> dict:
         raise RuntimeError(f"Ollama response was not valid JSON: {e}") from e
 
 
-def analyze(
+def _build_category_payload(df: pd.DataFrame, mapping: dict, category_name: str) -> str:
+    """Slice df to one category and serialize description samples for the cluster call."""
+    cat_col, desc_col = mapping["category"], mapping["description"]
+    sub = df[df[cat_col].astype(str) == str(category_name)]
+    if sub.empty:
+        raise RuntimeError(f"No tickets found for category {category_name!r}.")
+    samples = (
+        sub[desc_col].dropna().astype(str).head(MAX_SAMPLES).map(lambda s: s[:SNIPPET_CHARS]).tolist()
+    )
+    body = {
+        "category": str(category_name),
+        "ticket_count": int(len(sub)),
+        "description_samples": samples,
+    }
+    return f"Single-category cluster payload:\n\n{json.dumps(body, indent=2, default=str)}"
+
+
+def analyze_overview(
     df: pd.DataFrame,
     mapping: dict,
     provider: str = "gemini",
@@ -195,14 +234,34 @@ def analyze(
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
     ollama_host: str = DEFAULT_OLLAMA_HOST,
 ) -> dict:
-    """Run a model call (Gemini cloud or local Ollama) and return structured insights."""
+    """Generate the headline narrative and ranked category list."""
     if df.empty or not mapping.get("category") or not mapping.get("description"):
-        raise RuntimeError("DataFrame must be non-empty with 'category' and 'description' columns mapped.")
+        raise RuntimeError("DataFrame must be non-empty with 'category' and 'description' mapped.")
     payload = f"Ticket analytics payload:\n\n{json.dumps(_build_stats(df, mapping), indent=2, default=str)}"
     if provider == "ollama":
-        return _analyze_ollama(payload, ollama_model, ollama_host)
+        return _analyze_ollama(payload, ollama_model, ollama_host, OVERVIEW_SCHEMA)
     if provider == "gemini":
-        return _analyze_gemini(payload, api_key)
+        return _analyze_gemini(payload, api_key, OVERVIEW_SCHEMA)
+    raise RuntimeError(f"Unknown provider: {provider!r}. Use 'gemini' or 'ollama'.")
+
+
+def analyze_category(
+    df: pd.DataFrame,
+    mapping: dict,
+    category_name: str,
+    provider: str = "gemini",
+    api_key: str = "",
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    ollama_host: str = DEFAULT_OLLAMA_HOST,
+) -> dict:
+    """Cluster a single category's tickets into 1-5 named sub-issues."""
+    if df.empty or not mapping.get("category") or not mapping.get("description"):
+        raise RuntimeError("DataFrame must be non-empty with 'category' and 'description' mapped.")
+    payload = _build_category_payload(df, mapping, category_name)
+    if provider == "ollama":
+        return _analyze_ollama(payload, ollama_model, ollama_host, CATEGORY_SCHEMA)
+    if provider == "gemini":
+        return _analyze_gemini(payload, api_key, CATEGORY_SCHEMA)
     raise RuntimeError(f"Unknown provider: {provider!r}. Use 'gemini' or 'ollama'.")
 
 

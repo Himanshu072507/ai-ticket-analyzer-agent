@@ -2,6 +2,10 @@
 
 Upload an Excel/CSV of support tickets and get a crisp AI summary with charts, KPIs, and prioritized action items.
 
+<img width="1470" height="832" alt="image" src="https://github.com/user-attachments/assets/b7601589-52fb-4f21-8ac0-431937f0faa5" />
+<img width="1470" height="828" alt="image" src="https://github.com/user-attachments/assets/c0539522-d47d-4ac5-ba05-32502709c013" />
+<img width="1470" height="832" alt="image" src="https://github.com/user-attachments/assets/68092c40-8b0f-4400-988b-85a3eb728e6a" />
+
 ## Setup
 
 ```bash

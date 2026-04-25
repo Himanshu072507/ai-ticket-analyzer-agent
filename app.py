@@ -37,10 +37,17 @@ def auto_map(columns: list[str]) -> dict[str, str | None]:
     lowered = {c: c.strip().lower() for c in columns}
     mapping: dict[str, str | None] = {}
     for field, synonyms in FIELD_SYNONYMS.items():
+        # First, try exact matches
         match = next(
-            (orig for orig, low in lowered.items() if any(s == low or s in low for s in synonyms)),
+            (orig for orig, low in lowered.items() if any(s == low for s in synonyms)),
             None,
         )
+        # If no exact match, try substring matches
+        if match is None:
+            match = next(
+                (orig for orig, low in lowered.items() if any(s in low for s in synonyms)),
+                None,
+            )
         mapping[field] = match
     return mapping
 

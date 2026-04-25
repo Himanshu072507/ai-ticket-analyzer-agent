@@ -85,3 +85,20 @@ def category_dept_heatmap(df: pd.DataFrame, category_col: str, department_col: s
                     labels=dict(x="Department", y="Category", color="Tickets"), title=title)
     fig.update_layout(**_LAYOUT)
     return fig
+
+
+def mini_trend(series: pd.Series, title: str = "") -> go.Figure:
+    """Compact line chart for inline issue-detail trends. Empty figure if series is empty."""
+    fig = go.Figure()
+    fig.update_layout(
+        template="simple_white", height=200, margin=dict(l=10, r=10, t=30, b=10),
+        title=title or None,
+    )
+    if series is None or series.empty:
+        fig.add_annotation(text="No data", xref="paper", yref="paper",
+                           x=0.5, y=0.5, showarrow=False)
+        return fig
+    fig.add_trace(go.Scatter(x=series.index, y=series.values, mode="lines"))
+    fig.update_xaxes(title=None)
+    fig.update_yaxes(title="Tickets")
+    return fig

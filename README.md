@@ -13,10 +13,15 @@ cd ~/ticket-analyzer
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env and add your GEMINI_API_KEY
+# Edit .env and add GEMINI_API_KEY and/or GROQ_API_KEY
 ```
 
-Get a free key at https://aistudio.google.com/app/apikey. You can also paste it directly into the app's sidebar at runtime instead of using a .env file.
+Pick whichever cloud key you want to use:
+
+- **Gemini** — free key at https://aistudio.google.com/app/apikey
+- **Groq** — free key at https://console.groq.com/keys (uses `llama-3.3-70b-versatile` by default)
+
+You can also paste either key directly into the app's sidebar at runtime instead of using a `.env` file.
 
 ### Local (no-key) option — Ollama
 
@@ -47,7 +52,7 @@ Opens at http://localhost:8501. Upload `sample_tickets.xlsx` to try it immediate
 ## Files
 
 - `app.py` — Streamlit UI
-- `analyzer.py` — Gemini + Ollama backends, structured JSON output
+- `analyzer.py` — Gemini + Groq + Ollama backends, structured JSON output
 - `charts.py` — Plotly chart builders
 - `sample_tickets.xlsx` — 50 realistic sample rows
 
@@ -61,3 +66,19 @@ pytest -q -m smoke                   # also run the Streamlit AppTest smoke test
 ```
 
 Provider calls are mocked — no Gemini key or Ollama daemon required to run tests.
+
+## Deploy to Streamlit Community Cloud
+
+1. Sign in at https://share.streamlit.io with your GitHub account.
+2. Click **New app**, pick repo `Himanshu072507/ai-ticket-analyzer-agent`, branch `main`, main file `app.py`.
+3. Open **Advanced settings → Secrets** and paste:
+
+   ```toml
+   GEMINI_API_KEY = "your-gemini-key"
+   GROQ_API_KEY   = "your-groq-key"
+   ```
+
+   (Either key alone is enough; provide whichever provider you plan to use.)
+4. Click **Deploy**. The first build installs everything in `requirements.txt` and gives you a public `https://*.streamlit.app` URL.
+
+Ollama is local-only — pick **Gemini** or **Groq** in the deployed app. The Ollama option still appears but won't be able to reach a daemon from the cloud.

@@ -27,6 +27,9 @@ def create_streamlit_mock():
     st.info = MagicMock(return_value=None)
     st.success = MagicMock(return_value=None)
     st.error = MagicMock(return_value=None)
+    st.radio = MagicMock(return_value="Gemini (cloud)")
+    st.text_input = MagicMock(return_value="")
+    st.secrets = {}
     st.stop = MagicMock(side_effect=StopStreamlit)  # Raise a benign exception
     st.subheader = MagicMock(return_value=None)
     st.selectbox = MagicMock(return_value=None)

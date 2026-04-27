@@ -93,3 +93,38 @@ def test_overview_invalid_json_raises(sample_df, default_mapping):
     with patch.object(analyzer, "_call_gemini", return_value="not json {{{"):
         with pytest.raises(RuntimeError, match="not valid JSON"):
             analyze_overview(sample_df, default_mapping, provider="gemini", api_key="dummy")
+
+
+def test_analyze_overview_groq_path(sample_df, default_mapping, mock_overview_response):
+    with patch.object(analyzer, "_call_groq",
+                      return_value=json.dumps(mock_overview_response)) as mock_call:
+        out = analyze_overview(sample_df, default_mapping, provider="groq", api_key="dummy")
+    assert "headline" in out
+    assert isinstance(out["ranked_categories"], list)
+    assert mock_call.call_args.args[-1] is analyzer.OVERVIEW_SCHEMA
+
+
+def test_analyze_category_groq_path(sample_df, default_mapping, mock_clusters_response):
+    cat = sample_df[default_mapping["category"]].value_counts().index[0]
+    with patch.object(analyzer, "_call_groq",
+                      return_value=json.dumps(mock_clusters_response)) as mock_call:
+        out = analyze_category(sample_df, default_mapping, str(cat),
+                               provider="groq", api_key="dummy")
+    assert "clusters" in out and len(out["clusters"]) >= 1
+    assert mock_call.call_args.args[-1] is analyzer.CATEGORY_SCHEMA
+
+
+def test_groq_requires_api_key(sample_df, default_mapping):
+    with pytest.raises(RuntimeError, match="Groq API key is required"):
+        analyze_overview(sample_df, default_mapping, provider="groq", api_key="")
+
+
+def test_groq_invalid_json_raises(sample_df, default_mapping):
+    with patch.object(analyzer, "_call_groq", return_value="not json {{{"):
+        with pytest.raises(RuntimeError, match="not valid JSON"):
+            analyze_overview(sample_df, default_mapping, provider="groq", api_key="dummy")
+
+
+def test_unknown_provider_rejected(sample_df, default_mapping):
+    with pytest.raises(RuntimeError, match="Unknown provider"):
+        analyze_overview(sample_df, default_mapping, provider="bogus", api_key="dummy")

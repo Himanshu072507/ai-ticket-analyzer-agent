@@ -10,8 +10,10 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from analyzer import (
+    DEFAULT_GROQ_MODEL,
     DEFAULT_OLLAMA_HOST,
     DEFAULT_OLLAMA_MODEL,
+    GROQ_FALLBACK_MODELS,
     analyze_category,
     analyze_overview,
     list_ollama_models,
@@ -26,6 +28,17 @@ from charts import (
 )
 
 load_dotenv()
+
+
+def _secret(name: str) -> str:
+    """Look up a key in st.secrets first (Streamlit Cloud), then fall back to env vars (.env / shell)."""
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+    return os.getenv(name, "")
+
 
 st.set_page_config(page_title="AI Ticket Analyzer Agent", page_icon=":bar_chart:", layout="wide")
 
@@ -139,6 +152,7 @@ def render_drilldown(
     api_key: str,
     ollama_model: str,
     ollama_host: str,
+    groq_model: str,
 ) -> None:
     overview = st.session_state.get("overview")
     if not overview:
@@ -200,6 +214,7 @@ def render_drilldown(
                         df, mapping, selected,
                         provider=provider_id, api_key=api_key,
                         ollama_model=ollama_model, ollama_host=ollama_host,
+                        groq_model=groq_model,
                     )
                     st.session_state["category_clusters"][selected] = cached
                 except Exception as e:
@@ -241,32 +256,62 @@ def render_drilldown(
 st.title("AI Ticket Analyzer Agent")
 st.caption("Upload an Excel or CSV of support tickets to get charts, KPIs, and prioritized AI recommendations.")
 
+PROVIDER_OPTIONS = ["Gemini (cloud)", "Groq (cloud)", "Ollama (local)"]
+PROVIDER_BY_LABEL = {
+    "Gemini (cloud)": "gemini",
+    "Groq (cloud)": "groq",
+    "Ollama (local)": "ollama",
+}
+PROVIDER_LABEL_BY_ID = {v: k for k, v in PROVIDER_BY_LABEL.items()}
+
 with st.sidebar:
     st.subheader("Settings")
+    saved_provider = st.session_state.get("provider", "gemini")
+    default_label = PROVIDER_LABEL_BY_ID.get(saved_provider, PROVIDER_OPTIONS[0])
     provider = st.radio(
         "AI provider",
-        ["Gemini (cloud)", "Ollama (local)"],
-        index=0 if st.session_state.get("provider", "gemini") == "gemini" else 1,
-        help="Gemini needs an API key. Ollama runs fully offline on your laptop.",
+        PROVIDER_OPTIONS,
+        index=PROVIDER_OPTIONS.index(default_label),
+        help="Gemini and Groq are cloud APIs (need a key). Ollama runs fully offline on your laptop.",
     )
-    provider_id = "gemini" if provider.startswith("Gemini") else "ollama"
+    provider_id = PROVIDER_BY_LABEL[provider]
     st.session_state["provider"] = provider_id
 
     api_key = ""
     ollama_model = DEFAULT_OLLAMA_MODEL
     ollama_host = DEFAULT_OLLAMA_HOST
+    groq_model = DEFAULT_GROQ_MODEL
 
     if provider_id == "gemini":
-        env_key = os.getenv("GEMINI_API_KEY", "")
+        env_key = _secret("GEMINI_API_KEY")
         api_key = st.text_input(
             "Google Gemini API key",
-            value=st.session_state.get("api_key", env_key),
+            value=st.session_state.get("gemini_api_key", env_key),
             type="password",
             help="Paste your Gemini API key. Stored only in this session. Get one free at aistudio.google.com/app/apikey.",
         )
-        st.session_state["api_key"] = api_key
+        st.session_state["gemini_api_key"] = api_key
         if env_key and api_key == env_key:
-            st.caption("Loaded from `.env`.")
+            st.caption("Loaded from secrets / `.env`.")
+        elif not api_key:
+            st.caption("AI insights disabled until a key is provided.")
+    elif provider_id == "groq":
+        env_key = _secret("GROQ_API_KEY")
+        api_key = st.text_input(
+            "Groq API key",
+            value=st.session_state.get("groq_api_key", env_key),
+            type="password",
+            help="Paste your Groq API key. Stored only in this session. Get one free at console.groq.com/keys.",
+        )
+        st.session_state["groq_api_key"] = api_key
+        groq_model = st.selectbox(
+            "Model",
+            [DEFAULT_GROQ_MODEL, *GROQ_FALLBACK_MODELS],
+            index=0,
+            help="70b is sharper; 8b is faster.",
+        )
+        if env_key and api_key == env_key:
+            st.caption("Loaded from secrets / `.env`.")
         elif not api_key:
             st.caption("AI insights disabled until a key is provided.")
     else:
@@ -277,7 +322,8 @@ with st.sidebar:
             ollama_model = st.selectbox("Model", models, index=default_idx)
         else:
             st.warning(
-                "No Ollama models found. Pull one first, e.g. `ollama pull llama3.1:8b`."
+                "No Ollama models found. Pull one first, e.g. `ollama pull llama3.1:8b`. "
+                "Note: Ollama only works on your local machine — pick Gemini or Groq when running on Streamlit Cloud."
             )
             ollama_model = st.text_input("Model name", value=DEFAULT_OLLAMA_MODEL)
 
@@ -412,6 +458,7 @@ cache_key = (
     tuple(sorted(mapping.items())),
     provider_id,
     ollama_model if provider_id == "ollama" else None,
+    groq_model if provider_id == "groq" else None,
     filter_signature,
 )
 if st.session_state.get("overview_key") != cache_key:
@@ -419,35 +466,40 @@ if st.session_state.get("overview_key") != cache_key:
     st.session_state.pop("category_clusters", None)
     st.session_state.pop("selected_category", None)
 
-provider_ready = (provider_id == "gemini" and bool(api_key)) or (
-    provider_id == "ollama" and bool(ollama_model)
+provider_ready = (
+    (provider_id == "gemini" and bool(api_key))
+    or (provider_id == "groq" and bool(api_key))
+    or (provider_id == "ollama" and bool(ollama_model))
 )
 
 if "overview" not in st.session_state:
     if not provider_ready:
         if provider_id == "gemini":
-            st.info("Paste a Gemini API key in the sidebar (or set `GEMINI_API_KEY` in `.env`) to generate AI insights.")
+            st.info("Paste a Gemini API key in the sidebar (or set `GEMINI_API_KEY` in secrets / `.env`) to generate AI insights.")
+        elif provider_id == "groq":
+            st.info("Paste a Groq API key in the sidebar (or set `GROQ_API_KEY` in secrets / `.env`) to generate AI insights.")
         else:
             st.info("Select an Ollama model in the sidebar to generate AI insights.")
     elif st.button("Generate AI insights", type="primary"):
-        spinner_label = (
-            f"Ollama ({ollama_model}) is analyzing your tickets..."
-            if provider_id == "ollama"
-            else "Gemini is analyzing your tickets..."
-        )
+        spinner_label = {
+            "ollama": f"Ollama ({ollama_model}) is analyzing your tickets...",
+            "groq": f"Groq ({groq_model}) is analyzing your tickets...",
+            "gemini": "Gemini is analyzing your tickets...",
+        }[provider_id]
         with st.spinner(spinner_label):
             try:
                 st.session_state["overview"] = analyze_overview(
                     filtered_df, mapping,
                     provider=provider_id, api_key=api_key,
                     ollama_model=ollama_model, ollama_host=ollama_host,
+                    groq_model=groq_model,
                 )
                 st.session_state["overview_key"] = cache_key
             except Exception as e:
                 st.error(str(e))
 
 if "overview" in st.session_state:
-    render_drilldown(filtered_df, mapping, provider_id, api_key, ollama_model, ollama_host)
+    render_drilldown(filtered_df, mapping, provider_id, api_key, ollama_model, ollama_host, groq_model)
     md = drilldown_markdown(
         st.session_state["overview"],
         st.session_state.get("category_clusters", {}),

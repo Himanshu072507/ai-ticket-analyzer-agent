@@ -1,4 +1,4 @@
-"""Analyze a support-ticket DataFrame with Gemini or local Ollama and return structured insights."""
+"""Analyze a support-ticket DataFrame with Gemini, Groq, or local Ollama and return structured insights."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ MODEL = "gemini-2.5-flash"
 FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-2.5-flash-lite"]
 DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_FALLBACK_MODELS = ["llama-3.1-8b-instant"]
 MAX_SAMPLES = 30
 SNIPPET_CHARS = 200
 MAX_RETRIES = 3
@@ -176,6 +178,62 @@ def _call_ollama(host: str, model: str, payload: str, schema: dict) -> str:
     return content
 
 
+def _call_groq(client: Any, model: str, payload: str, schema: dict) -> str:
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": payload},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.2,
+        max_completion_tokens=4096,
+    )
+    content = response.choices[0].message.content
+    if not content:
+        raise RuntimeError("Groq returned empty content.")
+    return content
+
+
+def _analyze_groq(payload: str, api_key: str, model: str, schema: dict) -> dict:
+    if not api_key:
+        raise RuntimeError("Groq API key is required.")
+    try:
+        from groq import Groq
+    except ImportError as e:
+        raise RuntimeError("groq package is not installed. Run `pip install groq`.") from e
+
+    # Inject schema hint into payload so the model conforms (no native schema arg in Groq SDK).
+    schema_hint = (
+        "\n\nReturn JSON conforming exactly to this schema (no extra fields):\n"
+        + json.dumps(schema)
+    )
+    payload_with_schema = payload + schema_hint
+
+    client = Groq(api_key=api_key)
+    last_err: Exception | None = None
+    for candidate in [model, *GROQ_FALLBACK_MODELS]:
+        for attempt in range(MAX_RETRIES):
+            try:
+                text = _call_groq(client, candidate, payload_with_schema, schema)
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(f"Groq response was not valid JSON: {e}") from e
+            except RuntimeError:
+                raise
+            except Exception as e:
+                last_err = e
+                if _is_transient(e) and attempt < MAX_RETRIES - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                break
+    raise RuntimeError(
+        f"Groq API call failed after retrying {model} and fallbacks {GROQ_FALLBACK_MODELS}. "
+        f"Last error: {last_err}"
+    )
+
+
 def _analyze_gemini(payload: str, api_key: str, schema: dict) -> dict:
     if not api_key:
         raise RuntimeError("Gemini API key is required.")
@@ -238,6 +296,7 @@ def analyze_overview(
     api_key: str = "",
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
     ollama_host: str = DEFAULT_OLLAMA_HOST,
+    groq_model: str = DEFAULT_GROQ_MODEL,
 ) -> dict:
     """Generate the headline narrative and ranked category list."""
     if df.empty or not mapping.get("category") or not mapping.get("description"):
@@ -247,7 +306,9 @@ def analyze_overview(
         return _analyze_ollama(payload, ollama_model, ollama_host, OVERVIEW_SCHEMA)
     if provider == "gemini":
         return _analyze_gemini(payload, api_key, OVERVIEW_SCHEMA)
-    raise RuntimeError(f"Unknown provider: {provider!r}. Use 'gemini' or 'ollama'.")
+    if provider == "groq":
+        return _analyze_groq(payload, api_key, groq_model, OVERVIEW_SCHEMA)
+    raise RuntimeError(f"Unknown provider: {provider!r}. Use 'gemini', 'groq', or 'ollama'.")
 
 
 def analyze_category(
@@ -258,6 +319,7 @@ def analyze_category(
     api_key: str = "",
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
     ollama_host: str = DEFAULT_OLLAMA_HOST,
+    groq_model: str = DEFAULT_GROQ_MODEL,
 ) -> dict:
     """Cluster a single category's tickets into 1-5 named sub-issues."""
     if df.empty or not mapping.get("category") or not mapping.get("description"):
@@ -267,7 +329,9 @@ def analyze_category(
         return _analyze_ollama(payload, ollama_model, ollama_host, CATEGORY_SCHEMA)
     if provider == "gemini":
         return _analyze_gemini(payload, api_key, CATEGORY_SCHEMA)
-    raise RuntimeError(f"Unknown provider: {provider!r}. Use 'gemini' or 'ollama'.")
+    if provider == "groq":
+        return _analyze_groq(payload, api_key, groq_model, CATEGORY_SCHEMA)
+    raise RuntimeError(f"Unknown provider: {provider!r}. Use 'gemini', 'groq', or 'ollama'.")
 
 
 def list_ollama_models(host: str = DEFAULT_OLLAMA_HOST) -> list[str]:
